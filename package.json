@@ -1,8 +1,36 @@
 {
-  "name": "slomi-cli",
+  "name": "yamig",
   "version": "0.0.1",
-  "description": "Postgres migration management using slonik",
+  "description": "Postgres migration management",
   "main": "dist/index.js",
   "author": "Erik Källberg",
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=14 < 17"
+  },
+  "dependencies": {
+    "commander": "^8.2.0",
+    "pg": "^8.7.1",
+    "slonik": "24.1.0"
+  },
+  "scripts": {
+    "build": "tsc --build tsconfig.json",
+    "prepack": "tsc --clean --build tsconfig.json",
+    "lint": "eslint src/**/*.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^16.10.2",
+    "@types/pg": "^8.6.1",
+    "@typescript-eslint/eslint-plugin": "^4.32.0",
+    "@typescript-eslint/parser": "^4.32.0",
+    "eslint": "^7.32.0",
+    "eslint-config-prettier": "^8.3.0",
+    "eslint-config-standard": "^16.0.3",
+    "eslint-plugin-import": "^2.24.2",
+    "eslint-plugin-node": "^11.1.0",
+    "eslint-plugin-prettier": "^4.0.0",
+    "eslint-plugin-promise": "^5.1.0",
+    "prettier": "^2.4.1",
+    "typescript": "^4.4.3"
+  }
 }
