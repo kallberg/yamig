@@ -1,0 +1,8 @@
+{
+  "name": "slomi-cli",
+  "version": "0.0.1",
+  "description": "Postgres migration management using slonik",
+  "main": "dist/index.js",
+  "author": "Erik Källberg",
+  "license": "MIT"
+}
