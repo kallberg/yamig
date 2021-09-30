@@ -1,5 +1,5 @@
 {
-  "name": "yamig",
+  "name": "@kallberg/yamig",
   "version": "0.0.1",
   "description": "Postgres migration management",
   "main": "dist/index.js",
@@ -15,7 +15,7 @@
   },
   "scripts": {
     "build": "tsc --build tsconfig.json",
-    "prepack": "tsc --clean --build tsconfig.json",
+    "prepack": "tsc --build tsconfig.json --clean && tsc --build tsconfig.json",
     "lint": "eslint src/**/*.ts"
   },
   "devDependencies": {
@@ -32,5 +32,14 @@
     "eslint-plugin-promise": "^5.1.0",
     "prettier": "^2.4.1",
     "typescript": "^4.4.3"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kallberg/yamig"
+  },
+  "files": [
+    "dist/**/*.d.ts",
+    "dist/**/*.js",
+    "dist/**/*.map"
+  ]
 }
