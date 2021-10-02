@@ -1,4 +1,4 @@
-import { program as originalProgram } from "commander";
+import { Command } from "commander";
 import { promises } from "fs";
 import { createPool, DatabasePoolType, sql } from "slonik";
 import { Pool, PoolClient } from "pg";
@@ -9,15 +9,18 @@ const logger = pino({
   base: undefined,
 });
 
-const program = originalProgram.hook("preAction", (cmd, action) => {
-  const opts = cmd.opts();
+const program = new Command("yamig")
+  .hook("preAction", (cmd, action) => {
+    const opts = cmd.opts();
 
-  const options: { [key: string]: unknown } = { ...defaultOptions, ...opts };
+    if (opts.verbose) {
+      logger.level = "trace";
+    }
 
-  for (const key of Object.keys(options)) {
-    action.setOptionValue(key, options[key]);
-  }
-});
+    logger.trace({ action: `${action.name()}` }, "running action");
+  })
+  .addHelpCommand()
+  .option("-v --verbose");
 
 const fs = promises;
 
@@ -108,6 +111,16 @@ const ensureMigrationTable = async (
   `);
 };
 
+const assertDatabaseNameOption = (options: Options) => {
+  if (!options.dbname) {
+    logger.error(
+      { error: "dbname undefined", context: "up" },
+      "Expected database name, aborting"
+    );
+    process.exit(-1);
+  }
+};
+
 const fetchMigrationRecords = async (
   pool: DatabasePoolType
 ): Promise<readonly MigrationRecord[]> => {
@@ -189,10 +202,22 @@ const cmdNew = async (name: string) => {
 };
 
 const migrate = async (migrations: Migration[], client: PoolClient) => {
+  logger.info(
+    { migrations: migrations.length, context: "migrate" },
+    "running migrations"
+  );
   for (const migration of migrations) {
     try {
       logger.info(
-        `${migration.up ? "applying" : "reverting"} migration ${migration.name}`
+        {
+          migration: {
+            id: migration.id,
+            name: migration.name,
+            up: migration.up,
+          },
+          context: "migrate",
+        },
+        "applying migration"
       );
       await client.query("BEGIN");
       await client.query(migration.sql);
@@ -206,7 +231,18 @@ const migrate = async (migrations: Migration[], client: PoolClient) => {
       await client.query("COMMIT");
     } catch (reason) {
       if (reason instanceof Object) {
-        logger.error(reason);
+        logger.error(
+          {
+            error: reason,
+            migration: {
+              id: migration.id,
+              name: migration.name,
+              up: migration.up,
+            },
+            context: "migrate",
+          },
+          "failed to migrate"
+        );
       }
 
       await client.query("ROLLBACK");
@@ -215,15 +251,10 @@ const migrate = async (migrations: Migration[], client: PoolClient) => {
   }
 };
 
-const cmdUp = async (options: Options) => {
-  const localMigrations = await findLocalMigrations(true).then((ms) =>
-    ms.filter((m) => m.up)
-  );
+const migrateAll = async (options: Options, up: boolean) => {
+  const localMigrations = await findLocalMigrations(up);
 
-  if (!options.dbname) {
-    logger.error("Expected database name");
-    return program.outputHelp({ error: true });
-  }
+  assertDatabaseNameOption(options);
 
   const pool = poolFromOptions(options);
 
@@ -233,74 +264,50 @@ const cmdUp = async (options: Options) => {
   await pool.end();
 
   const toRun = localMigrations
-    .filter((m) => !recordSet.has(`${m.id}-${m.name}`))
+    .filter((m) => recordSet.has(`${m.id}-${m.name}`) !== up)
     .sort((a, b) => {
-      return a.id - b.id;
+      return up ? a.id - b.id : b.id - a.id;
     });
 
-  const pgPool = pgPoolFromOptions(options);
-
-  const client = await pgPool.connect();
-
   logger.info(
-    `running ${toRun.length} of ${localMigrations.length} migrations`
+    {
+      toRun: toRun.length,
+      applied: records.length,
+      local: localMigrations.length,
+      context: up ? "up" : "down",
+    },
+    "migration summary"
   );
+
+  if (!toRun.length) {
+    return;
+  }
+
+  const pgPool = pgPoolFromOptions(options);
+  const client = await pgPool.connect();
 
   await migrate(toRun, client);
   client.release();
 
   await pgPool.end();
+};
+
+const cmdUp = async (options: Options) => {
+  return migrateAll(options, true);
 };
 
 const cmdDown = async (options: Options) => {
-  const localMigrations = await findLocalMigrations(false).then((ms) =>
-    ms.filter((m) => !m.up)
-  );
-
-  if (!options.dbname) {
-    logger.error("Expected database name");
-    return program.outputHelp({ error: true });
-  }
-
-  const pool = poolFromOptions(options);
-
-  const records = await fetchMigrationRecords(pool);
-  const recordSet = new Set(records.map((r) => `${r.id}-${r.name}`));
-
-  await pool.end();
-
-  const toRun = localMigrations
-    .filter((m) => recordSet.has(`${m.id}-${m.name}`))
-    .sort((a, b) => {
-      return b.id - a.id;
-    });
-
-  const pgPool = pgPoolFromOptions(options);
-
-  const client = await pgPool.connect();
-
-  logger.info(
-    `reverting ${toRun.length} of ${localMigrations.length} migrations`
-  );
-
-  await migrate(toRun, client);
-  client.release();
-
-  await pgPool.end();
+  return migrateAll(options, false);
 };
 
 const cmdRevert = async (options: Options) => {
-  if (!options.dbname) {
-    logger.error("Expected database name");
-    return program.outputHelp({ error: true });
-  }
+  assertDatabaseNameOption(options);
 
   const pool = poolFromOptions(options);
   const head = await fetchMigrationHeadRecord(pool);
   await pool.end();
 
   if (!head) {
-    logger.info("Nothing to revert");
     return;
   }
 
@@ -310,6 +317,14 @@ const cmdRevert = async (options: Options) => {
 
   const client = await pgPool.connect();
 
+  logger.info(
+    {
+      head: { name: head.name, id: head.id, applied: head.applied },
+      context: "revert",
+    },
+    "reverting migration"
+  );
+
   await migrate([localMigration], client);
   client.release();
 
@@ -317,10 +332,7 @@ const cmdRevert = async (options: Options) => {
 };
 
 const cmdStatus = async (options: Options): Promise<void> => {
-  if (!options.dbname) {
-    logger.error("Expected database name");
-    return program.outputHelp({ error: true });
-  }
+  assertDatabaseNameOption(options);
 
   const pool = poolFromOptions(options);
   const records = await fetchMigrationRecords(pool);
@@ -347,30 +359,21 @@ const cmdStatus = async (options: Options): Promise<void> => {
 };
 
 program.command("new").argument("<name>", "migration name").action(cmdNew);
-program
-  .command("up")
-  .option("-h --host <host>")
-  .option("-p --port <port>")
-  .option("-d --dbname <name>")
-  .action(cmdUp);
-program
-  .command("down")
-  .option("-h --host <host>")
-  .option("-p --port <port>")
-  .option("-d --dbname <name>")
-  .action(cmdDown);
-program
-  .command("revert")
-  .option("-h --host <host>")
-  .option("-p --port <port>")
-  .option("-d --dbname <name>")
-  .action(cmdRevert);
-program
-  .command("status")
-  .option("-h --host <host>")
-  .option("-p --port <port>")
-  .option("-d --dbname <name>")
-  .action(cmdStatus);
+
+const dbCommandOptions = (cmd: Command): Command => {
+  cmd
+    .option("-h --host <host>", undefined, defaultOptions.host)
+    .option("-p --port <port>", undefined, defaultOptions.port.toString())
+    .option("-U --username <username>", undefined, defaultOptions.username)
+    .option("-W --password <password>")
+    .option("-d --dbname <name>");
+  return cmd;
+};
+
+dbCommandOptions(program.command("up")).action(cmdUp);
+dbCommandOptions(program.command("down")).action(cmdDown);
+dbCommandOptions(program.command("revert")).action(cmdRevert);
+dbCommandOptions(program.command("status")).action(cmdStatus);
 
 const main = async () => {
   await program.parseAsync();
