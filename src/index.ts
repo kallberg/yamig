@@ -1,19 +1,35 @@
-import { program } from "commander";
+import { program as originalProgram } from "commander";
 import { promises } from "fs";
 import { createPool, DatabasePoolType, sql } from "slonik";
-import { Pool } from "pg";
+import { Pool, PoolClient } from "pg";
+import pino from "pino";
+
+const logger = pino({
+  prettyPrint: { colorize: true },
+  base: undefined,
+});
+
+const program = originalProgram.hook("preAction", (cmd, action) => {
+  const opts = cmd.opts();
+
+  const options: { [key: string]: unknown } = { ...defaultOptions, ...opts };
+
+  for (const key of Object.keys(options)) {
+    action.setOptionValue(key, options[key]);
+  }
+});
 
 const fs = promises;
 
 type Migration = {
-  timestamp: number;
+  id: number;
   name: string;
   sql: string;
   up: boolean;
 };
 
 type MigrationRecord = {
-  timestamp: number;
+  id: number;
   name: string;
   applied: Date;
 };
@@ -23,7 +39,7 @@ type Options = {
   port: number;
   username: string;
   password: string | undefined;
-  dbname: string;
+  dbname: string | undefined;
 };
 
 const defaultOptions = {
@@ -85,10 +101,9 @@ const ensureMigrationTable = async (
 ): Promise<unknown> => {
   return pool.query(sql`
     CREATE TABLE IF NOT EXISTS migration (
-      timestamp int8 NOT NULL,
+      id bigint NOT NULL CONSTRAINT migration_pk PRIMARY KEY,
       name text NOT NULL,
-      applied timestamptz DEFAULT now() NOT NULL,
-      CONSTRAINT migration_pk PRIMARY KEY (timestamp, name)
+      applied timestamp with time zone DEFAULT NOW() NOT NULL
     );
   `);
 };
@@ -101,16 +116,35 @@ const fetchMigrationRecords = async (
   return pool.any<MigrationRecord>(sql`SELECT * FROM migration`);
 };
 
-const readLocalMigrations = async (): Promise<Migration[]> => {
+const readLocalMigration = async (
+  id: number,
+  name: string,
+  up: boolean
+): Promise<Migration> => {
+  const sqlSrc = await fs
+    .readFile(`migrations/${id}-${name}-${up ? "up.sql" : "down.sql"}`)
+    .then((buffer) => buffer.toString("utf-8"));
+
+  return {
+    id,
+    name,
+    sql: sqlSrc,
+    up,
+  };
+};
+
+const findLocalMigrations = async (up: boolean): Promise<Migration[]> => {
   await ensureMigrationDirectory();
   const matches: RegExpMatchArray[] = await fs
     .readdir("migrations")
     .then((contents) =>
-      contents.map((item) =>
-        item.match(
-          /^(?<timestamp>\d{13})-(?<name>.*)-(?<type>up\.sql|down\.sql)$/
-        )
-      )
+      contents.map((item) => {
+        if (up) {
+          return item.match(/^(?<id>\d{13})-(?<name>.*)-(up\.sql)$/);
+        } else {
+          return item.match(/^(?<id>\d{13})-(?<name>.*)-(down\.sql)$/);
+        }
+      })
     )
     .then((results) => results.filter<RegExpMatchArray>(notNull));
 
@@ -121,21 +155,24 @@ const readLocalMigrations = async (): Promise<Migration[]> => {
       throw new Error("Parse error");
     }
 
-    const { timestamp, name, type } = groups;
+    const { id, name } = groups;
 
-    const sqlSrc = await fs
-      .readFile(`migrations/${timestamp}-${name}-${type}`)
-      .then((buffer) => buffer.toString("utf-8"));
+    const migration = await readLocalMigration(parseInt(id), name, up);
 
-    migrations.push({
-      timestamp: parseInt(timestamp),
-      name,
-      sql: sqlSrc,
-      up: type === "up.sql",
-    });
+    migrations.push(migration);
   }
 
   return migrations;
+};
+
+const fetchMigrationHeadRecord = async (
+  pool: DatabasePoolType
+): Promise<MigrationRecord | null> => {
+  await ensureMigrationTable(pool);
+
+  return pool.maybeOne<MigrationRecord>(
+    sql`SELECT * FROM migration ORDER BY id DESC LIMIT 1`
+  );
 };
 
 const cmdNew = async (name: string) => {
@@ -151,50 +188,162 @@ const cmdNew = async (name: string) => {
     .then((handle) => handle.close);
 };
 
-const cmdUp = async (cliOptions: Partial<Options>) => {
-  const localMigrations = await readLocalMigrations().then((ms) =>
+const migrate = async (migrations: Migration[], client: PoolClient) => {
+  for (const migration of migrations) {
+    try {
+      logger.info(
+        `${migration.up ? "applying" : "reverting"} migration ${migration.name}`
+      );
+      await client.query("BEGIN");
+      await client.query(migration.sql);
+      if (migration.up) {
+        await client.query(
+          `INSERT INTO migration (id, name, applied) VALUES (${migration.id}, '${migration.name}', default)`
+        );
+      } else {
+        await client.query(`DELETE FROM migration WHERE id = ${migration.id}`);
+      }
+      await client.query("COMMIT");
+    } catch (reason) {
+      if (reason instanceof Object) {
+        logger.error(reason);
+      }
+
+      await client.query("ROLLBACK");
+      break;
+    }
+  }
+};
+
+const cmdUp = async (options: Options) => {
+  const localMigrations = await findLocalMigrations(true).then((ms) =>
     ms.filter((m) => m.up)
   );
 
-  if (!cliOptions.dbname) {
+  if (!options.dbname) {
+    logger.error("Expected database name");
     return program.outputHelp({ error: true });
   }
-
-  const options: Options = { ...defaultOptions, ...cliOptions } as Options;
 
   const pool = poolFromOptions(options);
 
   const records = await fetchMigrationRecords(pool);
-  const recordSet = new Set(records.map((r) => `${r.timestamp}-${r.name}`));
+  const recordSet = new Set(records.map((r) => `${r.id}-${r.name}`));
 
   await pool.end();
 
   const toRun = localMigrations
-    .filter((m) => !recordSet.has(`${m.timestamp}-${m.name}`))
+    .filter((m) => !recordSet.has(`${m.id}-${m.name}`))
     .sort((a, b) => {
-      return a.timestamp - b.timestamp;
+      return a.id - b.id;
     });
 
   const pgPool = pgPoolFromOptions(options);
 
   const client = await pgPool.connect();
 
-  for (const run of toRun) {
-    try {
-      await client.query("BEGIN");
-      await client.query(run.sql);
-      await client.query(
-        `INSERT INTO migration (timestamp, name, applied) VALUES (${run.timestamp}, '${run.name}', default)`
-      );
-      await client.query("COMMIT");
-    } catch (reason) {
-      client.query("ROLLBACK");
-      reason instanceof Error ? client.release(reason) : client.release(true);
-      break;
-    }
-  }
+  logger.info(
+    `running ${toRun.length} of ${localMigrations.length} migrations`
+  );
+
+  await migrate(toRun, client);
+  client.release();
 
   await pgPool.end();
+};
+
+const cmdDown = async (options: Options) => {
+  const localMigrations = await findLocalMigrations(false).then((ms) =>
+    ms.filter((m) => !m.up)
+  );
+
+  if (!options.dbname) {
+    logger.error("Expected database name");
+    return program.outputHelp({ error: true });
+  }
+
+  const pool = poolFromOptions(options);
+
+  const records = await fetchMigrationRecords(pool);
+  const recordSet = new Set(records.map((r) => `${r.id}-${r.name}`));
+
+  await pool.end();
+
+  const toRun = localMigrations
+    .filter((m) => recordSet.has(`${m.id}-${m.name}`))
+    .sort((a, b) => {
+      return b.id - a.id;
+    });
+
+  const pgPool = pgPoolFromOptions(options);
+
+  const client = await pgPool.connect();
+
+  logger.info(
+    `reverting ${toRun.length} of ${localMigrations.length} migrations`
+  );
+
+  await migrate(toRun, client);
+  client.release();
+
+  await pgPool.end();
+};
+
+const cmdRevert = async (options: Options) => {
+  if (!options.dbname) {
+    logger.error("Expected database name");
+    return program.outputHelp({ error: true });
+  }
+
+  const pool = poolFromOptions(options);
+  const head = await fetchMigrationHeadRecord(pool);
+  await pool.end();
+
+  if (!head) {
+    logger.info("Nothing to revert");
+    return;
+  }
+
+  const localMigration = await readLocalMigration(head.id, head.name, false);
+
+  const pgPool = pgPoolFromOptions(options);
+
+  const client = await pgPool.connect();
+
+  await migrate([localMigration], client);
+  client.release();
+
+  await pgPool.end();
+};
+
+const cmdStatus = async (options: Options): Promise<void> => {
+  if (!options.dbname) {
+    logger.error("Expected database name");
+    return program.outputHelp({ error: true });
+  }
+
+  const pool = poolFromOptions(options);
+  const records = await fetchMigrationRecords(pool);
+  await pool.end();
+
+  const localMigrations = await findLocalMigrations(true);
+
+  const ids = new Set([
+    ...records.map((r) => r.id),
+    ...localMigrations.map((m) => m.id),
+  ]);
+
+  for (const id of ids.keys()) {
+    const localMigration = localMigrations.find((l) => l.id === id);
+    const record = records.find((r) => r.id === id);
+
+    const name = record?.name ?? localMigration?.name;
+    const applied = !!record?.applied;
+
+    process.stdout.write(`${id}-${name} applied: ${applied}\n`);
+  }
+
+  return;
 };
 
 program.command("new").argument("<name>", "migration name").action(cmdNew);
@@ -204,12 +353,32 @@ program
   .option("-p --port <port>")
   .option("-d --dbname <name>")
   .action(cmdUp);
+program
+  .command("down")
+  .option("-h --host <host>")
+  .option("-p --port <port>")
+  .option("-d --dbname <name>")
+  .action(cmdDown);
+program
+  .command("revert")
+  .option("-h --host <host>")
+  .option("-p --port <port>")
+  .option("-d --dbname <name>")
+  .action(cmdRevert);
+program
+  .command("status")
+  .option("-h --host <host>")
+  .option("-p --port <port>")
+  .option("-d --dbname <name>")
+  .action(cmdStatus);
 
 const main = async () => {
   await program.parseAsync();
+
+  process.exit(0);
 };
 
 main().catch((reason) => {
-  process.stderr.write(`${reason}\n`);
+  logger.error(reason);
   process.exit(-1);
 });

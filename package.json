@@ -11,6 +11,8 @@
   "dependencies": {
     "commander": "^8.2.0",
     "pg": "^8.7.1",
+    "pino": "^6.13.3",
+    "pino-pretty": "^7.0.1",
     "slonik": "24.1.0"
   },
   "scripts": {
@@ -21,6 +23,7 @@
   "devDependencies": {
     "@types/node": "^16.10.2",
     "@types/pg": "^8.6.1",
+    "@types/pino": "^6.3.11",
     "@typescript-eslint/eslint-plugin": "^4.32.0",
     "@typescript-eslint/parser": "^4.32.0",
     "eslint": "^7.32.0",
