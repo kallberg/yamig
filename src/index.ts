@@ -360,20 +360,19 @@ const cmdStatus = async (options: Options): Promise<void> => {
 
 program.command("new").argument("<name>", "migration name").action(cmdNew);
 
-const dbCommandOptions = (cmd: Command): Command => {
+const dbCommand = (cmd: Command, name: string): Command =>
   cmd
+    .command(name)
     .option("-h --host <host>", undefined, defaultOptions.host)
     .option("-p --port <port>", undefined, defaultOptions.port.toString())
     .option("-U --username <username>", undefined, defaultOptions.username)
     .option("-W --password <password>")
     .option("-d --dbname <name>");
-  return cmd;
-};
 
-dbCommandOptions(program.command("up")).action(cmdUp);
-dbCommandOptions(program.command("down")).action(cmdDown);
-dbCommandOptions(program.command("revert")).action(cmdRevert);
-dbCommandOptions(program.command("status")).action(cmdStatus);
+dbCommand(program, "up").action(cmdUp);
+dbCommand(program, "down").action(cmdDown);
+dbCommand(program, "revert").action(cmdRevert);
+dbCommand(program, "status").action(cmdStatus);
 
 const main = async () => {
   await program.parseAsync();
