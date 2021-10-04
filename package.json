@@ -44,5 +44,6 @@
     "dist/**/*.d.ts",
     "dist/**/*.js",
     "dist/**/*.map"
-  ]
+  ],
+  "bin": "dist/index.js"
 }

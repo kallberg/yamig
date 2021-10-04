@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { Command } from "commander";
 import { promises } from "fs";
 import { createPool, DatabasePoolType, sql } from "slonik";
